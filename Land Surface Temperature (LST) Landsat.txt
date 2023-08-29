@@ -1,0 +1,101 @@
+
+//Input Study Area
+var Aoi = ee.FeatureCollection("projects/ee-zamilahamedlimon/assets/DhakaDistrict");
+
+// Cloud mask function
+function maskL8sr(col) {
+  var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 5);
+  var qa = col.select('pixel_qa');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return col.updateMask(mask);
+}
+
+// Center the map on the Area of Interest (Aoi)
+Map.centerObject(Aoi);
+
+// Visualization parameters for RGB image
+var vizParams2 = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000,
+  gamma: 1.4,
+};
+
+// Load the collection, apply cloud mask and date filter
+var col = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+  .map(maskL8sr)
+  .filterDate('2021-01-01', '2021-12-31')
+  .filterBounds(Aoi);
+
+// Calculate median image and clip to Aoi
+var image = col.median().clip(Aoi);
+
+// Calculate NDVI and rename
+var ndvi = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+
+// Thermal band 10 with brightness temperature
+var thermal = image.select('B10').multiply(0.1);
+
+// Find min and max values of NDVI
+var min = ee.Number(ndvi.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: Aoi,
+  scale: 30,
+  maxPixels: 1e9
+}).values().get(0));
+
+var max = ee.Number(ndvi.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: Aoi,
+  scale: 30,
+  maxPixels: 1e9
+}).values().get(0));
+
+// Calculate fractional vegetation
+var fv = ndvi.subtract(min).divide(max.subtract(min)).pow(ee.Number(2)).rename('FV');
+
+// Calculate Emissivity
+var a = ee.Number(0.004);
+var b = ee.Number(0.986);
+var EM = fv.multiply(a).add(b).rename('EMM');
+
+// Calculate Land Surface Temperature (LST) in Celsius
+var LST = thermal.expression(
+  '(Tb / (1 + (0.00115 * (Tb / 1.438)) * log(Ep))) - 273.15', {
+  'Tb': thermal.select('B10'),
+  'Ep': EM.select('EMM')
+}).rename('LST');
+
+// Chart the LST time series
+var ts1 = ui.Chart.image.series({
+  imageCollection: col,
+  region: Aoi,
+  reducer: ee.Reducer.median(),
+  scale: 1000,
+}).setOptions({
+  title: 'LST 2021 Time Series',
+  vAxis: {title: 'LST Celsius'}
+});
+
+// Add layers to the map
+Map.addLayer(image, vizParams2, 'RGB Image');
+Map.addLayer(ndvi, {min: -1, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI');
+Map.addLayer(thermal, {min: 291.918, max: 302.382, palette: ['blue', 'white', 'green']}, 'Thermal');
+Map.addLayer(fv, {}, 'Fractional Vegetation');
+Map.addLayer(EM, {min: 0.9865619146722164, max: 0.989699971371314}, 'Emissivity');
+Map.addLayer(LST, {min: 20.569706944223423, max: 29.328077233404645, palette: ['040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+'0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+'3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+'ff0000', 'de0101', 'c21301', 'a71001', '911003']}, 'LST');
+
+// Uncomment the following lines to export LST image
+// Export.image.toDrive({
+//   image: LST,
+//   description: 'UHI of Chittagong',
+//   region: Aoi,
+//   scale: 30,
+//   crs: 'EPSG:32646'
+// });
